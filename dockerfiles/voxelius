@@ -1,39 +1,71 @@
 # Phase 0 smoke test image — DO NOT skip this before trusting hostRuntime.js.
 # Goal: confirm, on real CheerpX, before writing more integration code:
-#   1. openjdk-17-jre-headless still installs on current Debian i386 repos
-#   2. Paper boots past its self-attach agent (the actual CheerpJ blocker)
+#   1. all three JDKs below still install on current Debian i386 repos
+#   2. Paper/Fabric/Forge boot correctly under each JDK they require
 #   3. what -Xmx actually survives before the JVM refuses to start (should
 #      land somewhere 1.5-2.5GB per the 32-bit address-space math)
 #   4. rough tick performance under a bot-simulated player load
-FROM i386/debian:bullseye
+#
+# BASE IMAGE HISTORY (bullseye -> bookworm -> trixie): checked
+# packages.debian.org directly at each step because Debian does NOT keep
+# every JDK line available forever, and no single release has ever had the
+# full spread we need:
+#   bullseye (11): openjdk-8/11/17      — no 21, no 25
+#   bookworm (12): openjdk-11/17/21     — openjdk-8 dropped entirely
+#   trixie   (13): openjdk-17/21/25     — openjdk-11 dropped entirely
+# We land on trixie because Mojang moved to year-based MC version numbers
+# in 2026 and 26.1+ now requires Java 25 (confirmed against Mojang's own
+# 26.1 snapshot notes) — so 25 is a hard requirement now, not a nice-to-
+# have. Java 11 support is dropped as a floor the same way Java 8 was:
+# 17 already runs the pre-1.17 range (Mojang/Paper's own official minimum
+# for that range was already 8 OR 11 interchangeably per their own compat
+# notes), so nothing currently released actually needs an 11-specific JVM
+# that 17 can't also run.
+FROM i386/debian:trixie
 
-# Multiple JDKs — different Minecraft versions need different Java
-# versions (older releases want Java 8, modern Paper wants 17+). One
-# base image with all of them installed, selecting the right one per
-# boot at runtime, is simpler than shipping separate images per JDK.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    openjdk-8-jre-headless \
     openjdk-17-jre-headless \
+    openjdk-21-jre-headless \
+    openjdk-25-jre-headless \
     wget ca-certificates \
     && rm -rf /var/lib/apt/lists/*
+
+# Do NOT rely on `update-alternatives`' default /usr/bin/java — with three
+# JDKs installed, whichever one apt happens to register last "wins" that
+# symlink, and hostRuntime.js needs a DETERMINISTIC binary per Minecraft
+# version, not "whatever the base image felt like." hostRuntime.js invokes
+# JDKs by their explicit versioned path instead:
+#   /usr/lib/jvm/java-17-openjdk-i386/bin/java
+#   /usr/lib/jvm/java-21-openjdk-i386/bin/java
+#   /usr/lib/jvm/java-25-openjdk-i386/bin/java
+# CONFIRM-IN-PHASE-0: these exact directory names — Debian's openjdk
+# packages have used this java-<N>-openjdk-<arch> layout for years, but
+# confirm against the real built image (`docker run --rm <image> ls
+# /usr/lib/jvm/`) before trusting the paths hostRuntime.js hardcodes. This
+# matters MORE now than it used to: trixie's openjdk-17/21 packages are
+# built with Hotspot Zero rather than full JIT on some non-primary
+# architectures per their package descriptions — CONFIRM which JIT i386
+# actually gets, since Zero-only would tank tick performance versus what
+# bullseye's JIT build gave you. This is exactly what test #4 in the intro
+# comment above needs to catch.
 
 WORKDIR /srv
 RUN echo "eula=true" > /srv/eula.txt
 
-# NOTE: no server.jar COPY here on purpose. The actual Minecraft jar is
-# fetched fresh per boot by hostRuntime.js's _fetchServerJar() (whatever
-# vanilla/Paper version the user picked) and staged into /srv via the
+# NOTE: no server.jar COPY here on purpose. The actual Minecraft/Fabric/
+# Forge jar is fetched fresh per boot by hostRuntime.js's _fetchServerJar()
+# (whatever version+loader the user picked) and staged into /srv via the
 # DataDevice mechanism — see hostRuntime.js's _stageWorldFilesIntoDataDevice().
-# This image only needs to supply the OS + JDKs, so ONE image serves
-# every Minecraft/Paper version, not just whatever was baked in at
-# build time. For a quick manual smoke test only (not the real
-# pipeline), you can temporarily add `COPY server.jar /srv/server.jar`
-# back in to boot one fixed jar without needing hostRuntime.js at all.
+# This image only needs to supply the OS + JDKs, so ONE image serves every
+# Minecraft/Paper/Fabric/Forge version, not just whatever was baked in at
+# build time. For a quick manual smoke test only (not the real pipeline),
+# you can temporarily add `COPY server.jar /srv/server.jar` back in to boot
+# one fixed jar without needing hostRuntime.js at all.
 
 # No ENTRYPOINT/CMD needed for the smoke test — CheerpX boots the image
 # and you run the java command manually via cx.run() to watch it live,
-# same as you'd type at a real terminal:
-#   java -Xmx2G -DPaper.IgnoreJavaVersion=true -jar /srv/server.jar --nogui
+# same as you'd type at a real terminal, e.g. for a 26.1 server (Java 25):
+#   /usr/lib/jvm/java-25-openjdk-i386/bin/java -Xmx2G -jar /srv/server.jar --nogui
 #
 # Boot it standalone with this (confirmed against cheerpx.io/docs — see
 # hostRuntime.js in website/js/ for the full annotated version once this
@@ -54,7 +86,7 @@ RUN echo "eula=true" > /srv/eula.txt
 #       ],
 #     });
 #     cx.setConsole(document.getElementById("console"));
-#     await cx.run("/usr/bin/java", ["-Xmx2G", "-DPaper.IgnoreJavaVersion=true", "-jar", "/srv/server.jar", "--nogui"], { cwd: "/srv" });
+#     await cx.run("/usr/lib/jvm/java-21-openjdk-i386/bin/java", ["-Xmx2G", "-jar", "/srv/server.jar", "--nogui"], { cwd: "/srv" });
 #   </script>
 #
 # Needs COOP/COEP headers even on localhost — see website/_headers for the
